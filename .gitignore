@@ -2,3 +2,8 @@
 /obj_dir/
 *.elf
 *.bin
+debug/analysis
+debug/*.csv
+debug/*.vcd
+tools/
+.venv

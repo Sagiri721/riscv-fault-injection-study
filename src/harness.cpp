@@ -9,31 +9,82 @@
 #include <iostream>
 #include <memory>
 #include <functional>
+#include <cstring>
+#include <string>
+#include <vector>
 
 #include "Vpicorv32.h"
 #include "Vpicorv32___024root.h"
 #include "verilated_vcd_c.h"
 #include "verilated.h"
-#include "runtime.h"
+
+#include "campaign.h"
 
 uint32_t image[MEM_WORDS];
+
+inline static void usage(const char* prog) {
+    fprintf(stderr,
+        "usage: %s program.bin [results.csv] [--regs=5,6,7] [--stride=N] [--vcd=path]\n"
+        "  --regs    cpuregs indices to inject into (default: all of x1..x31)\n"
+        "  --stride  inject every N-th cycle instead of every cycle (default: 1)\n"
+        "  --vcd     where to write the golden-run waveform (default: debug/wave.vcd)\n",
+        prog);
+}
 
 int main(int argc, char** argv) {
     Verilated::commandArgs(argc, argv);
 
-    if (argc < 2) {
-        fprintf(stderr, "usage: %s program.bin\n", argv[0]);
+    const char* binPath = nullptr;
+    const char* resultsPath = "debug/fault_results.csv";
+    std::vector<int> regs;
+    uint64_t stride = 1;
+    int positional = 0;
+
+    for (int i = 1; i < argc; ++i) {
+        if (std::strncmp(argv[i], "--regs=", 7) == 0) {
+            std::string list = argv[i] + 7;
+            for (char& c : list) if (c == ',') c = ' ';
+            const char* p = list.c_str();
+            char* end = nullptr;
+            for (;;) {
+                long v = std::strtol(p, &end, 10);
+                if (end == p) break;
+                regs.push_back(static_cast<int>(v));
+                p = end;
+            }
+        } else if (std::strncmp(argv[i], "--vcd=", 6) == 0) {
+            debugFile = argv[i] + 6;
+        } else if (std::strncmp(argv[i], "--stride=", 9) == 0) {
+            stride = std::strtoull(argv[i] + 9, nullptr, 10);
+        } else if (std::strncmp(argv[i], "--", 2) == 0) {
+            usage(argv[0]);
+            return 1;
+        } else if (positional == 0) {
+            binPath = argv[i]; ++positional;
+        } else if (positional == 1) {
+            resultsPath = argv[i]; ++positional;
+        } else {
+            usage(argv[0]);
+            return 1;
+        }
+    }
+
+    if (!binPath) {
+        usage(argv[0]);
         return 1;
     }
 
-    FILE* f = fopen(argv[1], "rb");
+    if (regs.empty()) {
+        for (int r = 1; r < 32; ++r) regs.push_back(r); // x0 is hardwired to zero
+    }
+
+    FILE* f = fopen(binPath, "rb");
     if (!f) {
         perror("open");
         return 1;
     }
 
-    const size_t bytes_read =
-        fread(image, 1, sizeof(image), f);
+    const size_t bytes_read = fread(image, 1, sizeof(image), f);
 
     if (ferror(f)) {
         perror("read");
@@ -43,36 +94,13 @@ int main(int argc, char** argv) {
 
     fclose(f);
 
-    const uint64_t max_cycles = 1000000;
+    if (bytes_read == 0) {
+        fprintf(stderr, "program image is empty: %s\n", binPath);
+        return 1;
+    }
 
-    const Result golden = run(image, max_cycles, nullptr);
+    const uint64_t maxCycles = 1000000;
 
-    printf("GOLDEN:\n");
-    printf("\tOUT:\t0x%08x\n", golden.out);
-    printf("\tENDING:\t%s\n", ending_to_string(golden.ending));
-    printf("\tCYCLES:\t%llu\n", static_cast<unsigned long long>(golden.cycles));
-
-    Fault fault{
-        .tgt = &targets[0],
-        .idx = 0,
-        .bit = 4,
-        .cycle = 20
-    };
-
-    const Result tampered = run(image, max_cycles, &fault);
-    const Outcome outcome = classify(tampered, golden);
-
-    printf("\nFAULT:\n");
-    printf("\tTARGET\t%s[%d]\n", fault.tgt->name, fault.idx);
-
-    printf("\tBIT:\t%d\n", fault.bit);
-    printf("\tCYCLE:\t%llu\n", static_cast<unsigned long long>(fault.cycle));
-
-    printf("\nTAMPERED:\n");
-    printf("\tOUT:\t0x%08x\n", tampered.out);
-    printf("\tENDING:\t%s\n", ending_to_string(tampered.ending));
-    printf("\tCYCLES:\t%llu\n", static_cast<unsigned long long>(tampered.cycles));
-    printf("\tOUTCOME\t%s\n", outcome_to_string(outcome));
-
-    return 0;
+    return runCampaign(image, maxCycles, regs.data(), static_cast<int>(regs.size()),
+                       resultsPath, stride) ? 0 : 1;
 }

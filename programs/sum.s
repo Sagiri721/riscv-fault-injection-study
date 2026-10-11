@@ -1,3 +1,5 @@
+# regs: 5 6 7 28
+# sum: 1+2+...+10 in a register loop. Expected output: 55
     .section .text
     .globl _start
 _start:
